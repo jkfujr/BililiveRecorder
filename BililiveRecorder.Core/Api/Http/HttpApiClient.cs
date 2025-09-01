@@ -12,6 +12,7 @@ using BililiveRecorder.Core.Config.V3;
 using Flurl;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Serilog;
 
 namespace BililiveRecorder.Core.Api.Http
 {
@@ -28,6 +29,7 @@ namespace BililiveRecorder.Core.Api.Http
         private string? buvid3;
 
         private readonly GlobalConfig config;
+        private static readonly ILogger logger = Log.ForContext<HttpApiClient>();
 
         private readonly Wbi wbi = new Wbi();
         private DateTimeOffset wbiLastUpdate = DateTimeOffset.MinValue;
@@ -161,9 +163,61 @@ namespace BililiveRecorder.Core.Api.Http
             return await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
         }
 
+        // lb 响应解析
+        private string ProcessLoadBalancerResponse(string responseText, string url, string apiContext = "")
+        {
+            if (string.IsNullOrEmpty(responseText))
+                throw new InvalidOperationException("Response text is null");
+
+            var contextPrefix = string.IsNullOrEmpty(apiContext) ? "" : apiContext;
+            logger.Debug("{Context}响应接收完成, URL: {Url}, 响应长度: {ResponseLength}", contextPrefix, url, responseText.Length);
+            
+            if (responseText.StartsWith("{") && responseText.Contains("\"lb\":") && responseText.Contains("\"raw\":"))
+            {
+                logger.Debug("{Context}检测到LB响应", contextPrefix);
+                var wrappedResponse = JsonConvert.DeserializeObject<JObject>(responseText);
+                if (wrappedResponse != null && wrappedResponse.ContainsKey("lb") && wrappedResponse.ContainsKey("raw"))
+                {
+                    var lbInfo = wrappedResponse["lb"];
+                    if (lbInfo != null)
+                    {
+                        var lbUid = lbInfo["uid"]?.ToObject<long>() ?? 0;
+                        var lbBuvid3 = lbInfo["buvid3"]?.ToObject<string>();
+                        
+                        logger.Debug("{Context}信息提取完成, UID: {LoadBalancerUid}, Buvid3: {LoadBalancerBuvid3}, 当前UID: {CurrentUid}, 当前Buvid3: {CurrentBuvid3}", 
+                            contextPrefix, lbUid, lbBuvid3, this.uid, this.buvid3);
+                        
+                        if (lbUid > 0)
+                        {
+                            this.uid = lbUid;
+                            logger.Information("{Context}UID已更新, UID: {UpdatedUid}", contextPrefix, lbUid);
+                        }
+                        if (!string.IsNullOrWhiteSpace(lbBuvid3))
+                        {
+                            this.buvid3 = lbBuvid3;
+                            logger.Information("{Context}Buvid3已更新, Buvid3: {UpdatedBuvid3}", contextPrefix, lbBuvid3);
+                        }
+                    }
+                    
+                    var originalText = responseText;
+                    responseText = wrappedResponse["raw"]?.ToString() ?? responseText;
+                    logger.Debug("{Context}原始响应数据提取完成, 原始长度: {OriginalLength}, 提取后长度: {ExtractedLength}", 
+                        contextPrefix, originalText.Length, responseText.Length);
+                }
+            }
+            else
+            {
+                // logger.Debug("{Context}接收到标准响应", contextPrefix);
+            }
+            
+            return responseText;
+        }
+
         private async Task<BilibiliApiResponse<T>> FetchAsync<T>(string url) where T : class
         {
             var text = await this.FetchAsTextAsync(url).ConfigureAwait(false);
+            text = this.ProcessLoadBalancerResponse(text, url);
+            
             var obj = JsonConvert.DeserializeObject<BilibiliApiResponse<T>>(text);
             return obj?.Code != 0 ? throw new BilibiliApiResponseCodeNotZeroException(obj?.Code, text) : obj;
         }
@@ -184,6 +238,7 @@ namespace BililiveRecorder.Core.Api.Http
             q.AddOrReplace(Wbi.WTS, sign.ts);
 
             var text = await this.FetchAsTextAsync(url).ConfigureAwait(false);
+            text = this.ProcessLoadBalancerResponse(text, url, "房间信息API");
 
             var jobject = JObject.Parse(text);
 
