@@ -169,7 +169,7 @@ namespace BililiveRecorder.Core.Api.Http
             if (string.IsNullOrEmpty(responseText))
                 throw new InvalidOperationException("Response text is null");
 
-            var contextPrefix = string.IsNullOrEmpty(apiContext) ? "" : apiContext;
+            var contextPrefix = "LB响应";
             logger.Debug("{Context}响应接收完成, URL: {Url}, 响应长度: {ResponseLength}", contextPrefix, url, responseText.Length);
             
             if (responseText.StartsWith("{") && responseText.Contains("\"lb\":") && responseText.Contains("\"raw\":"))
